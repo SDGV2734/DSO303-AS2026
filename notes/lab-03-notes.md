@@ -88,7 +88,7 @@ cloud-init failing, a service listening only on localhost or the wrong port, a
 host firewall rejecting traffic, or the application returning errors. The
 specific missing class is anything inside the guest OS and process layer. On
 real AWS I would retain these configuration checks and add a TCP/HTTP health
-check from outside the VPC.
+check from outside the VPC . 
 
 ### 7. Web tier versus data tier: instance, subnet, and VPC properties
 
