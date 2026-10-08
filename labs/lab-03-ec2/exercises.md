@@ -1,0 +1,286 @@
+# Lab 03 — Independent Exercises
+
+Completed on 2026-10-09 using Floci 1.7.0 in `us-east-1`.
+
+## Exercise 1 — Basic: a maintenance instance
+
+I launched the maintenance instance using the required long command-line form and
+without an instance profile:
+
+```bash
+ADMIN_INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id "$USMS_BASE_AMI" \
+  --instance-type t3.micro \
+  --key-name usms-app-key \
+  --subnet-id "$USMS_PUBLIC_SUBNET_B" \
+  --security-group-ids "$USMS_APP_SG" \
+  --tag-specifications \
+    'ResourceType=instance,Tags=[{Key=Name,Value=usms-admin-01-host},{Key=Project,Value=USMS},{Key=Tier,Value=admin},{Key=Lab,Value=03},{Key=Ephemeral,Value=true}]' \
+  --query 'Instances[0].InstanceId' --output text)
+
+aws ec2 wait instance-running --instance-ids "$ADMIN_INSTANCE_ID"
+```
+
+Before Exercise 4 removed it, the result was:
+
+```text
+ADMIN_INSTANCE_ID=i-9dfccc258bb919fa1
+Name=usms-admin-01-host  State=running  AZ=b  Profile=None
+```
+
+The instance was not added to `configs/lab-03.env`.
+
+Floci limitation encountered: Floci initially reused occupied host SSH ports after
+a restart, causing two attempted instances to terminate before boot. I preserved
+the configured `usms-db-01`, removed only an accidental duplicate, retried using
+the same waiter-based procedure, and obtained the running instance above. Real
+AWS does not map every EC2 instance's SSH port onto one local Docker host, so this
+specific port collision does not occur there.
+
+## Exercise 2 — Intermediate: a self-describing bootstrap
+
+The bootstrap is in [`user-data-db.sh`](user-data-db.sh). Its marker guard is:
+
+```bash
+MARKER=/var/log/usms-db-bootstrap.done
+if [ -f "$MARKER" ]; then
+  echo "USMS database bootstrap already completed; refusing to run twice"
+  exit 0
+fi
+```
+
+The outer heredoc used to create such a script must be quoted (`<<'EOF'`) so the
+local shell does not expand `$MARKER`, command substitutions, or metadata values
+before EC2 receives the script.
+
+Validation before launch:
+
+```text
+user-data-db.sh syntax OK; bytes=854; under-16KiB=yes
+```
+
+Launch command:
+
+```bash
+DB02_INSTANCE_ID=$(aws ec2 run-instances \
+  --image-id "$USMS_BASE_AMI" \
+  --instance-type t3.micro \
+  --key-name usms-app-key \
+  --subnet-id "$USMS_PRIVATE_SUBNET_B" \
+  --security-group-ids "$USMS_DB_SG" \
+  --user-data file://labs/lab-03-ec2/user-data-db.sh \
+  --tag-specifications \
+    'ResourceType=instance,Tags=[{Key=Name,Value=usms-db-02},{Key=Project,Value=USMS},{Key=Tier,Value=data},{Key=Lab,Value=03}]' \
+  --query 'Instances[0].InstanceId' --output text)
+
+aws ec2 wait instance-running --instance-ids "$DB02_INSTANCE_ID"
+```
+
+Result:
+
+```text
+DB02_INSTANCE_ID=i-ce00bc8132d1fb56b
+Name=usms-db-02  State=running  AZ=us-east-1b
+Subnet=subnet-21f4b94d  Public=None  Profile=None
+DB02 USER DATA PROVEN: byte-identical
+```
+
+The normal Step 12 `describe-instance-attribute` response omitted
+`UserData.Value` in this Floci build. I therefore extracted `userData` from
+Floci's persisted EC2 record with `jq -j` and ran `diff`; it produced no output.
+Real AWS would return the Base64 value through `describe-instance-attribute`.
+
+User data normally runs once through cloud-init. A rerun could occur if an
+administrator explicitly reconfigured cloud-init to run it per boot, invoked the
+script manually, or baked it into another startup service. The marker makes all
+of those reruns exit before changing PostgreSQL or the database.
+
+## Exercise 3 — Problem solving: a reachability report
+
+The report is implemented by
+[`../../scripts/utilities/lab-03-reachability.sh`](../../scripts/utilities/lab-03-reachability.sh).
+It derives each verdict from the subnet route table, presence of a public
+address, and the attached security groups. It never uses an instance name or
+tier to decide the verdict.
+
+I used `set -uo pipefail` without `-e`. Missing optional fields and failed
+lookups are inputs to classification; `-e` could terminate the report before it
+prints the remaining instances.
+
+I ran it from the repository root and from `labs/lab-03-ec2/`, captured both
+outputs, and confirmed that `diff` produced no output. After Exercise 4 removed
+the admin host, its output was:
+
+```text
+NAME                 PRIVATE-IP       PUBLIC-IP        VERDICT       REASON
+usms-db-01           172.19.0.6       -                UNREACHABLE   no igw route on subnet
+usms-web-02          172.19.0.9       127.0.0.1        REACHABLE     igw route + sg allows 80/tcp from 0.0.0.0/0
+usms-web-01          172.19.0.3       127.0.0.1        REACHABLE     igw route + sg allows 80/tcp from 0.0.0.0/0
+usms-web-02          172.19.0.4       127.0.0.1        REACHABLE     igw route + sg allows 80/tcp from 0.0.0.0/0
+usms-db-02           172.19.0.8       -                UNREACHABLE   no igw route on subnet
+```
+
+The duplicate `usms-web-02` rows are real duplicate instances already present
+in Floci, not duplicate output generated by the script. Floci uses Docker bridge
+addresses and loopback-style public addresses here; real AWS would show VPC and
+routable public addresses.
+
+## Exercise 4 — Challenge: right-size and clean up
+
+### Recommendation
+
+I would scale out to at least two web instances in different Availability Zones
+behind an Application Load Balancer, managed by an Auto Scaling group. Four
+hundred mostly-read concurrent users are naturally distributable, and scaling
+out removes the single-instance failure domain. Scaling up is simpler and may
+buy immediate headroom, but one larger instance is still a single point of
+failure.
+
+Scaling up does nothing about overnight idle cost unless the instance can be
+stopped or resized on a schedule. Scaling out supports scheduled or metric-based
+reduction after peak hours. A public service that must remain available should
+retain at least two small instances; a service allowed to be offline overnight
+could schedule desired capacity to zero, but the load balancer's hourly charge
+continues while it exists.
+
+### T3 CPU credits
+
+A `t3.micro` has two vCPUs, earns 12 credits per hour, and has a 10% baseline per
+vCPU. Below baseline it accrues credits; above baseline it spends them. At 85%
+sustained CPU it consumes about 102 credits per hour while earning 12, a deficit
+of about 90 credits per hour. Even a full 288-credit balance lasts only about
+3.2 hours at that deficit. In Standard mode it then falls toward baseline. T3
+defaults to Unlimited mode on real AWS, where sustained surplus use continues
+but incurs an additional charge (AWS lists $0.05 per vCPU-hour for T3 surplus
+credits). Floci returned `UnsupportedOperation` for
+`describe-instance-credit-specifications`, so the local credit mode is not
+observable; Floci also does not model real CPU consumption.
+
+Sources:
+
+- AWS, [T3 instances](https://aws.amazon.com/ec2/instance-types/t3/): baseline,
+  Unlimited default, and surplus-credit pricing.
+- AWS EC2 User Guide, [burstable credit concepts](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-credits-baseline-concepts.html):
+  `t3.micro` earns 12 credits/hour, has a 288-credit cap, and a 10% baseline.
+
+### Monthly cost comparison
+
+The estimates use Linux On-Demand prices in `us-east-1` and 730 hours/month,
+before data transfer, storage, taxes, and discounts:
+
+| Option | Calculation | Approx. monthly cost |
+|---|---:|---:|
+| One `t3.micro` (current compute only) | $0.0104 × 730 | $7.59 |
+| One `t3.medium` (scale up) | $0.0416 × 730 | $30.37 |
+| Two `t3.micro` + ALB base | 2 × $7.59 + ($0.0225 × 730) | $31.61 plus LCUs |
+| Two `t3.micro` + ALB at 1 average LCU | $31.61 + ($0.008 × 730) | $37.45 |
+
+AWS's current pricing guidance lists `t3.micro` at $0.0104/hour and
+`t3.medium` at $0.0416/hour in `us-east-1`. AWS's
+[Elastic Load Balancing pricing](https://aws.amazon.com/elasticloadbalancing/pricing/)
+charges $0.0225 per ALB-hour plus $0.008 per LCU-hour in its US East examples.
+The comparison makes the trade-off explicit: a single medium is cheaper than a
+two-instance/ALB design, but it does not provide multi-AZ availability.
+
+### Deletion plan and execution
+
+Dependency order was: terminate the ephemeral instance, delete any unattached
+volumes, then release only truly unused EIPs. Before deletion, the audit found no
+available unattached volumes. The apparently unassociated `usms-nat-eip` was
+referenced by `usms-nat`, so it was not an orphan and was not released.
+
+```bash
+# DANGER: this permanently terminates an EC2 instance.
+# TARGET: i-9dfccc258bb919fa1 (usms-admin-01-host, Ephemeral=true).
+# IMPACT: the instance cannot be restarted after termination.
+# CHECK: no Section 16 KEEP resource is named by this command.
+aws ec2 terminate-instances --instance-ids i-9dfccc258bb919fa1
+aws ec2 wait instance-terminated --instance-ids i-9dfccc258bb919fa1
+```
+
+```bash
+# DANGER: this permanently deletes every selected EBS volume.
+# TARGET: only status=available, Project=USMS volumes after manual review.
+# IMPACT: deleted volume data cannot be recovered without a snapshot.
+# CHECK: USMS_WEB_DATA_VOLUME and all attached/root volumes are excluded.
+for volume_id in $(aws ec2 describe-volumes \
+  --filters 'Name=status,Values=available' 'Name=tag:Project,Values=USMS' \
+  --query 'Volumes[].VolumeId' --output text); do
+  aws ec2 delete-volume --volume-id "$volume_id"
+done
+```
+
+The loop selected zero volumes, so no volume deletion was sent.
+
+```bash
+# DANGER: releasing an Elastic IP returns it permanently to AWS's pool.
+# TARGET: only unassociated EIPs not referenced by any NAT gateway.
+# IMPACT: DNS or clients using a released address will stop working.
+# CHECK: usms-web-eip and usms-nat-eip are explicitly protected.
+for allocation_id in $(aws ec2 describe-addresses \
+  --query 'Addresses[?AssociationId==null].AllocationId' --output text); do
+  aws ec2 describe-nat-gateways \
+    --query 'NatGateways[].NatGatewayAddresses[].AllocationId' --output text |
+    grep -qw "$allocation_id" && continue
+  [ "$allocation_id" = "$USMS_WEB_EIP_ALLOC" ] && continue
+  aws ec2 release-address --allocation-id "$allocation_id"
+done
+```
+
+The loop found no releasable EIP. After deleting the admin host:
+
+```text
+running Tier=admin instances: 0
+available unattached volumes: 0
+PASS=36  FAIL=0
+```
+
+## Exercise 5 — Integration: prepare the S3 hand-off
+
+The upload client is [`transcript-upload.sh`](transcript-upload.sh). It validates
+both arguments and the file, constructs
+`s3://usms-student-data/transcripts/<student-id>/<filename>`, and runs `aws s3 cp`
+without containing, reading, or referencing any access key. Its missing-argument
+test returned exit code 2 and a usable `Usage:` message.
+
+`usms-app-sg` already has the requested inbound TCP 443 rule from `0.0.0.0/0`, so
+I did not create a duplicate. Inbound 443 is for clients initiating HTTPS toward
+the web tier; it is not what permits an S3 upload. The existing default egress
+rule allows all protocols to `0.0.0.0/0`, and security groups are stateful, so
+the instance can initiate HTTPS to S3 and receive response traffic without a
+separate outbound TCP 443 rule.
+
+`USMS_BUCKET_NAME=usms-student-data` already exists in `configs/lab-01.env`, so
+the exercise correctly did not duplicate it in `configs/lab-03.env`.
+
+The generated `outputs/lab-03-s3-readiness.txt` contains:
+
+```text
+Instance ID: i-9c2ae17cd84c77491
+Instance profile ARN: arn:aws:iam::000000000000:instance-profile/usms-ec2-app-profile
+Role name: usms-ec2-app-role
+Attached policy name: USMSStudentDataReadWrite
+Bucket ARN in policy: arn:aws:s3:::usms-student-data
+Intended bucket name: usms-student-data
+head-bucket exit code: 254
+head-bucket output: aws: [ERROR]: An error occurred (404) when calling the HeadBucket operation: Not Found
+Readiness verdict: EC2 identity and permissions are configured; only bucket creation remains.
+```
+
+The nonzero exit code and 404 are the evidence: the EC2-side identity chain is
+complete, while the named S3 bucket does not exist yet. Creating that bucket is
+the single missing resource that makes the policy actionable.
+
+## Floci persistence limitation observed during final verification
+
+During the final Step 19 proof, Floci 1.7.0 preserved the instance records,
+subnet IDs, security groups, EBS attachment, Elastic IP allocation and AMI, but
+changed several Docker-backed instances from `running` to `stopped` after the
+Floci container restarted. The local Docker runtime containers retained/reused
+host SSH ports, which is not part of the real EC2 model. I started the affected
+instances again and compared the same instance IDs, subnet IDs and security
+group IDs against the pre-restart inventory. The diff was empty and
+`outputs/lab-03-step19-proof.txt` records `PERSISTENCE PROVEN`. On real AWS, an
+AWS control-plane service restart is not an operation a customer performs and
+would not stop EC2 instances; this behavior is specific to the emulator's local
+container runtime.

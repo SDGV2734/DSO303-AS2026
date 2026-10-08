@@ -49,7 +49,7 @@ check "vpc DNS hostnames enabled" \
 
 check "usms-igw exists"               "aws ec2 describe-internet-gateways --internet-gateway-ids $USMS_IGW_ID"
 check "usms-igw ATTACHED to usms-vpc" \
-  "test \"\$(aws ec2 describe-internet-gateways --internet-gateway-ids $USMS_IGW_ID --query 'InternetGateways[0].Attachments[0].VpcId' --output text)\" = $USMS_VPC_ID"
+  "test \"\$(aws ec2 describe-internet-gateways --internet-gateway-ids $USMS_IGW_ID --query 'length(InternetGateways[0].Attachments[?VpcId==\`$USMS_VPC_ID\`])' --output text)\" -ge 1"
 
 check "public subnet a exists"        "aws ec2 describe-subnets --subnet-ids $USMS_PUBLIC_SUBNET_A"
 check "public subnet a auto-assigns public IP" \
@@ -92,7 +92,8 @@ check "configs/lab-02.env has no empty values" \
   "! grep -qE 'export [A-Z_]+=$|=None$' configs/lab-02.env"
 check "policies/usms-db-sg-ingress.json is valid JSON" \
   "python3 -m json.tool policies/usms-db-sg-ingress.json"
-check "no secret is tracked by git" "! git ls-files | grep -q '^outputs/'"
+check "no secret is tracked by git" \
+  "! git ls-files outputs/ | grep -v '^outputs/\.gitkeep$' | grep -q ."
 check ".gitignore uses outputs/* not outputs/" "grep -q '^outputs/\*' .gitignore"
 
 echo; echo "PASS=$PASS  FAIL=$FAIL"

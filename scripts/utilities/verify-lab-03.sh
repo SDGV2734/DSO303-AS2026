@@ -65,7 +65,7 @@ check "usms-web-01 has an instance profile" \
 check "that profile is usms-ec2-app-profile" \
   "q $USMS_WEB_INSTANCE 'IamInstanceProfile.Arn' | grep -q $USMS_INSTANCE_PROFILE"
 check "usms-web-01 has user data stored" \
-  "test -n \"\$(aws ec2 describe-instance-attribute --instance-id $USMS_WEB_INSTANCE --attribute userData --query 'UserData.Value' --output text)\""
+  "value=\$(aws ec2 describe-instance-attribute --instance-id $USMS_WEB_INSTANCE --attribute userData --query 'UserData.Value' --output text); { test -n \"\$value\" && test \"\$value\" != None; } || jq -e --arg id $USMS_WEB_INSTANCE 'to_entries[] | select(.value.instanceId == \$id and (.value.userData | length > 0))' \"$FLOCI_HOST_DATA_DIR/ec2-instances.json\""
 check "usms-web-01 has a public address" \
   "test \"\$(q $USMS_WEB_INSTANCE PublicIpAddress)\" != None"
 check "an Elastic IP is associated with usms-web-01" \
