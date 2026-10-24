@@ -49,6 +49,9 @@ spec:
         project: usms
         tier: app
     spec:
+      # Lab 08 Step 11 - only schedule onto nodes carrying the node group's label.
+      nodeSelector:
+        workload: usms
       # Exercise 4 - never put all enrolment capacity on one node.
       # ADVISORY: spread pods evenly across nodes (hostname); ScheduleAnyway so a
       # one-node cluster can still run both replicas instead of leaving one Pending.
@@ -144,20 +147,6 @@ spec:
     - name: http
       port: 80
       targetPort: http
----
-# Exercise 4 - ENFORCED: a voluntary disruption (kubectl drain, node-group upgrade)
-# may never evict an enrolment pod if that would leave fewer than 1 ready.
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: usms-enrolment-pdb
-  namespace: usms
-  labels:
-    app: usms-enrolment
-    project: usms
-    tier: app
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      app: usms-enrolment
+# Lab 07 Exercise 4 also defined usms-enrolment-pdb (minAvailable 1) here.
+# Lab 08 Step 12 redefines it as maxUnavailable 1, so the PDB now lives ONLY in
+# manifests/lab-08/30-pdb-gateway.yaml - one object, one file, no drift.

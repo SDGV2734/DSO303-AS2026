@@ -1,0 +1,50 @@
+# Lab 08 Exercise 4 - expose the results service to the university network only.
+#
+# Rung: Ingress (top of the ladder) in front of the existing ClusterIP Service usms-results
+# (bottom rung). No NodePort and no second type: LoadBalancer Service are needed, because
+# with target-type ip the ALB sends traffic straight to the results pod IPs.
+#
+# One load balancer, not two: group.name puts this Ingress into the SAME ALB as
+# usms-portal-ingress (an "IngressGroup"), so it adds listener rules, not a new ALB.
+#
+# Locally there is no ingress controller (Floci starts k3s with --disable=traefik), so this
+# object is stored and validated but nothing acts on it. Every annotation below is what the
+# AWS Load Balancer Controller would act on in real EKS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: usms-results-ingress
+  namespace: usms
+  labels:
+    app: usms-results
+    project: usms
+    lab: "05b"
+  annotations:
+    # Share ONE ALB with usms-portal-ingress (put the same group.name on that Ingress too).
+    alb.ingress.kubernetes.io/group.name: usms-portal
+    alb.ingress.kubernetes.io/group.order: "10"
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    # A normal HTTP port.
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/healthcheck-path: /healthz
+    # Only the university network may use this rule. 203.0.113.0/24 is a documentation
+    # placeholder (RFC 5737) - replace it with the university's real egress range.
+    # This becomes a source-IP condition on the /results listener rule; enrolment's rules
+    # do not get it, so enrolment's exposure is unchanged.
+    alb.ingress.kubernetes.io/conditions.usms-results: >-
+      [{"field":"source-ip","sourceIpConfig":{"values":["203.0.113.0/24"]}}]
+    # A stable, human name for the address (needs ExternalDNS + a Route 53 zone on real AWS).
+    external-dns.alpha.kubernetes.io/hostname: results.usms.example.edu
+    alb.ingress.kubernetes.io/tags: Project=USMS,Tier=web,Lab=08,Owner=ExaminationsOffice
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /results
+            pathType: Prefix
+            backend:
+              service:
+                name: usms-results
+                port:
+                  number: 80

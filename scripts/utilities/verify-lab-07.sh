@@ -65,8 +65,10 @@ check "usms-enrolment has 2 ready replicas" \
   "test \"\$(kubectl get deploy usms-enrolment -n usms -o jsonpath='{.status.readyReplicas}')\" = 2"
 check "usms-results has 2 ready replicas" \
   "test \"\$(kubectl get deploy usms-results -n usms -o jsonpath='{.status.readyReplicas}')\" = 2"
-check "usms-gateway has 1 ready replica" \
-  "test \"\$(kubectl get deploy usms-gateway -n usms -o jsonpath='{.status.readyReplicas}')\" = 1"
+# Lab 08 Exercise 2 raised the gateway to 2 replicas (so its PDB allows a drain); the Lab 08 guide
+# expects "at least 2, 2 and 1", so this checks for at least 1 rather than exactly 1.
+check "usms-gateway has at least 1 ready replica" \
+  "test \"\$(kubectl get deploy usms-gateway -n usms -o jsonpath='{.status.readyReplicas}')\" -ge 1"
 check "service usms-enrolment has at least 2 endpoints" \
   "test \"\$(kubectl get endpoints usms-enrolment -n usms -o jsonpath='{.subsets[0].addresses}' | grep -o 'ip' | wc -l)\" -ge 2"
 check "usms-enrolment declares a cpu request (Lab 08 needs it)" \
