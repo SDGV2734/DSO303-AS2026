@@ -49,6 +49,26 @@ spec:
         project: usms
         tier: app
     spec:
+      # Exercise 4 - never put all enrolment capacity on one node.
+      # ADVISORY: spread pods evenly across nodes (hostname); ScheduleAnyway so a
+      # one-node cluster can still run both replicas instead of leaving one Pending.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: usms-enrolment
+      # ADVISORY: prefer not to co-locate two enrolment pods on the same node.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app: usms-enrolment
       containers:
         - name: enrolment
           image: nginx:1.27-alpine
@@ -124,3 +144,20 @@ spec:
     - name: http
       port: 80
       targetPort: http
+---
+# Exercise 4 - ENFORCED: a voluntary disruption (kubectl drain, node-group upgrade)
+# may never evict an enrolment pod if that would leave fewer than 1 ready.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: usms-enrolment-pdb
+  namespace: usms
+  labels:
+    app: usms-enrolment
+    project: usms
+    tier: app
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: usms-enrolment

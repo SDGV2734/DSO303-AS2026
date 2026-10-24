@@ -200,3 +200,119 @@ needed to run outside AWS.
   protects every outputs/ file (including outputs/lab-07-secret.yaml and the base64 Secret in it).
 - `git ls-files outputs/` -> only `outputs/.gitkeep`.
 - The Secret manifest was never in manifests/, so nothing secret is staged.
+
+## Exercise 5 Part 3 - which configs/lab-07.env variables Lab 08 needs, and why
+- `USMS_EKS_CLUSTER` - every `aws eks` call in Lab 08 and the kubeconfig/context it re-creates.
+- `USMS_EKS_NODEGROUP` - `aws eks update-nodegroup-config` (Lab 08 Step 10) scales the data plane from the AWS side.
+- `USMS_EKS_NAMESPACE` - every `kubectl` call; Lab 08 works only inside `usms`.
+- `USMS_EKS_LB_PORTS` - the host ports (8081,8082) a LoadBalancer Service/Ingress can publish on; without
+  the tag Lab 08 Step 15 has nothing to reach and the cluster would have to be recreated.
+- `USMS_EKS_ENDPOINT` - to confirm kubectl points at the right API server (https://localhost:6500) after a
+  restart - directly relevant here, since Docker Desktop kept flipping my context.
+- `USMS_K8S_DEPLOY_ENROLMENT` - the Deployment the HorizontalPodAutoscaler targets.
+- `USMS_K8S_CPU_REQUEST` (50m) - the HPA divides measured CPU by this; Part 1 measured 1m = 2% at idle,
+  so I can check the HPA's arithmetic rather than trust it.
+- `USMS_K8S_DEPLOY_GATEWAY` / `USMS_K8S_SVC_GATEWAY` - the gateway is what Lab 08 exposes
+  (port-forward -> NodePort -> LoadBalancer -> Ingress).
+- Not needed by Lab 08 directly: the role/policy ARNs and the SG (Lab 09's least-privilege review uses
+  them), the results Deployment/Service names, and the manifest dir (useful for re-applying after a crash).
+
+---
+
+# Section 14 - Review Questions
+
+### 1. ACTIVE cluster, every pod Pending
+`ACTIVE` describes only the **control plane** - the API server, etcd, scheduler and controllers that AWS
+runs. It says nothing about the **data plane**, the worker nodes where pods actually run. The scheduler is
+working (that's why the pods exist and are `Pending` rather than missing), but it has nowhere valid to
+put them. Two configurations that produce exactly this:
+(a) **no node group, or nodes that never joined** - e.g. a node role missing `eks:DescribeCluster`, or a
+node role that trusts `eks.amazonaws.com` instead of `ec2.amazonaws.com`, so instances boot but never
+register; `kubectl get nodes` is empty or shows only a tainted control-plane node.
+(b) **nodes exist but cannot fit the pods** - requests larger than any node (my `usms-toobig`:
+"0/1 nodes are available: Insufficient cpu, Insufficient memory"), a `nodeSelector` such as
+`workload=usms` matching no node label, an untolerated taint, or a cordoned node (Exercise 4: "1 node(s)
+were unschedulable"). In every case `kubectl describe pod` → Events → `FailedScheduling` names the reason.
+
+### 2. Swapping the two trust policies
+The cluster role would trust `ec2.amazonaws.com` and the node role would trust `eks.amazonaws.com`.
+On real AWS the first failure is at **Step 8, `create-cluster`**: EKS must assume the cluster role to create
+the control-plane ENIs in my subnets, and the role does not trust `eks.amazonaws.com`, so the call is
+rejected (or the cluster goes `FAILED`). If that were somehow fixed alone, **Step 10/11** fails next:
+the node instances cannot assume a role that only trusts `eks.amazonaws.com`, so they get no credentials,
+the kubelet cannot call `eks:DescribeCluster` or pull from ECR, and the node group stays `CREATING`/
+`DEGRADED` with zero `Ready` nodes - `kubectl get nodes` is empty. On Floci I would notice **nowhere**:
+Floci stores trust and permission policies but never evaluates them, so every step succeeds. That is
+why the lab checks the trust principal explicitly (`verify-lab-07.sh` tests both).
+
+### 3. Readiness probe vs liveness probe
+**Readiness** answers "should this pod receive traffic right now?" - failing it removes the pod from the
+Service's endpoints but leaves the container running. **Liveness** answers "is this container wedged
+beyond recovery?" - failing it makes the kubelet kill and restart the container.
+Getting it backwards, concretely: put a check that depends on load or on the database (e.g. `/ready`
+that times out when the DB is slow) on the **liveness** probe. During enrolment week the DB slows down, the
+probe times out, Kubernetes restarts every enrolment pod; restarted pods hit the DB with cold caches,
+time out again, and the service goes into a restart storm - a slowdown becomes a full outage. The right
+design is: dependency/load checks on readiness (shed traffic, recover by itself), and liveness only on a
+cheap local check like my `/healthz`. Exercise 3 shows the other side: a readiness probe pointing at a
+path that 404s silently keeps pods out of the Service forever while they look `Running`.
+
+### 4. Rollback that still reports 1.1.0
+`kubectl rollout undo` restores the previous **pod template** - image, env wiring, probes - by scaling an
+old ReplicaSet back up. The value `APP_VERSION` was not in the pod template; it came from the
+**ConfigMap** `usms-app-config` via `envFrom`, and the ConfigMap is a separate object that undo does not
+touch. The old template plus the still-new ConfigMap = 1.1.0.
+I'd argue the statement is **half true**: Kubernetes rollback is a real, fast, reliable rollback of the
+*workload definition*, but it is not a rollback of the *release* if the release also changed config,
+Secrets or anything outside the template. The practice that resolves it is **versioning configuration
+with the workload**: immutable, versioned ConfigMaps (e.g. `usms-app-config-v2`, or a content hash in the
+name as Kustomize's configMapGenerator does) referenced from the pod template - then changing config
+changes the template, creates a new ReplicaSet, and `rollout undo` switches the config back too. Keeping
+manifests in Git and rolling back by re-applying a previous commit (GitOps) achieves the same.
+
+### 5. maxUnavailable: 0 vs the default 25%/25%
+`usms-enrolment` (maxUnavailable 0, maxSurge 1) always keeps 2 ready pods: it adds a third, waits for it
+to be Ready, then removes an old one - capacity never drops, at the cost of needing room for one extra pod.
+The default 25%/25% is *intended* to allow some unavailability, but percentages are rounded:
+maxUnavailable rounds **down** (25% of 2 = 0.5 → 0) and maxSurge rounds **up** (0.5 → 1), so with only
+2 replicas it behaves the same as enrolment - which is what I observed (peak 4 pod objects, never below
+2 Ready). The difference appears from 4 replicas (1 pod may go down).
+Suited to `maxUnavailable: 0`: a user-facing service at peak where every pod is needed - enrolment during
+registration week. Suited to the default (or higher maxUnavailable): background or batch-like services,
+or clusters with no spare capacity to surge into, where a faster rollout matters more than full capacity.
+Lab 04's ECS configuration (`minimumHealthyPercent 100`, `maximumPercent 200`) is the equivalent of
+**maxUnavailable: 0** - never go below desired, surge above it.
+
+### 6. "A Secret is encrypted, so it's fine to commit the manifest"
+That is wrong. In Step 17 I ran `kubectl get secret ... -o jsonpath='{.data.ENROLMENT_API_TOKEN}' | base64 -d`
+and got `floci-dummy-token-not-a-real-secret` back with no key at all - **base64 is an encoding, not
+encryption**. A committed Secret manifest is a plaintext credential in Git history forever.
+What a Secret *does* provide: it keeps the value out of the image and out of the Deployment spec, can be
+restricted separately with RBAC (who may `get secrets`), is not shown by `kubectl describe`, and is
+delivered to the pod as an env var or a file. What it does *not* provide: confidentiality at rest (etcd
+stores it as base64 unless encryption is configured), protection from anyone with `get secret` on the
+namespace, or protection inside the container (`printenv` shows it in plain text).
+On real EKS I would: never commit Secret manifests (I generated mine into the git-ignored `outputs/`);
+enable **KMS envelope encryption** of Secrets at cluster creation; keep the real value in **AWS Secrets
+Manager** and sync it in (External Secrets Operator / Secrets Store CSI driver) or have the app read it
+using **IRSA / Pod Identity**; and lock down `get secrets` with RBAC.
+
+### 7. ECS or Kubernetes for USMS
+For USMS - a small team, one region, a few stateless services, quiet for eight months and very busy for
+two - I would choose **ECS on Fargate**. Things this lab made harder than Lab 04:
+- **Two systems to operate instead of one.** Every step was either `aws eks` or `kubectl`, with separate
+  endpoints, credentials and contexts; my kubectl context silently switched clusters twice.
+- **I own a data plane.** A node group, a node IAM role separate from the cluster role, node upgrades,
+  and - locally - a control-plane container that crashed under memory pressure and refused to restart
+  after an IP change. With Fargate there were no nodes at all.
+- **IAM per workload is harder.** ECS gave each task a task role directly; on EKS the simple path (node
+  role) shares permissions with every pod on the node, and the correct path (IRSA) needs an OIDC provider,
+  a web-identity trust policy and an annotated ServiceAccount - which my build could not complete.
+- More YAML and more concepts (Deployments, ReplicaSets, Services, ConfigMaps, probes, PDBs).
+What Kubernetes gave me that ECS could not: **built-in service discovery by DNS name** for many small
+services with no load balancer between them (the gateway routes to `usms-enrolment.usms.svc.cluster.local`
+with zero AWS resources), **portable declarative manifests** that would run unchanged on any conformant
+cluster, and fine-grained controls such as PodDisruptionBudgets and topology spread (Exercise 4).
+The two-month peak is handled well by either (Lab 06's ECS autoscaling vs Lab 08's HPA), so for a team
+this size the lower operational cost of ECS wins; I would revisit if USMS grew to many services or needed
+to leave AWS.
