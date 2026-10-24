@@ -1,0 +1,21 @@
+{
+  "_comment": "Lab 09 Exercise 2. HIGH findings reviewed and ACCEPTED by a person, each with a reason and a compensating control. Read by scripts/utilities/usms-iam-audit.sh. An entry without both is ignored. Remove an entry the day its reason stops being true.",
+  "accepted": [
+    {
+      "role": "usms-ec2-app-role",
+      "finding": "service principal ec2.amazonaws.com with NO Condition",
+      "reason": "EC2 does not send aws:SourceArn/aws:SourceAccount when it assumes an instance-profile role, so a confused-deputy condition on this trust would deny every instance (the role would stop working). It cannot be fixed with a condition.",
+      "compensating_control": "Who can hand this role to an instance is controlled instead: USMSDeployBase explicitly DENIES iam:PassRole to ec2.amazonaws.com; credentials are only reachable through the instance metadata service, which is meant to require IMDSv2 tokens with hop limit 1 (Step 11 - not enforceable on Floci 1.7.0, enforced on real AWS).",
+      "accepted_by": "Lab 09 security review",
+      "review_by": "2027-05-16"
+    },
+    {
+      "role": "AWSServiceRoleForEcsApplicationAutoscaling",
+      "finding": "service principal ecs.application-autoscaling.amazonaws.com with NO Condition",
+      "reason": "This is an AWS service-linked role (path /aws-service-role/): AWS owns and manages its trust policy and it cannot be edited by the account. It was created by Lab 06's register-scalable-target.",
+      "compensating_control": "Only the Application Auto Scaling service itself can assume a service-linked role, and its permissions are an AWS-managed policy scoped to ECS scaling; deleting the scalable target (lab-06-cleanup.sh) is what removes it.",
+      "accepted_by": "Lab 09 security review",
+      "review_by": "2027-05-16"
+    }
+  ]
+}

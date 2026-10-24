@@ -1,0 +1,32 @@
+[
+  {
+    "IpProtocol": "tcp", "FromPort": 443, "ToPort": 443,
+    "PrefixListIds": [ { "PrefixListId": "pl-63a5400a",
+      "Description": "Req 1 - S3 (transcripts) via the Lab 02 gateway endpoint's managed prefix list" } ]
+  },
+  {
+    "IpProtocol": "tcp", "FromPort": 443, "ToPort": 443,
+    "IpRanges": [ { "CidrIp": "0.0.0.0/0",
+      "Description": "Req 2 - HTTPS to AWS service endpoints incl. STS for instance-profile credentials; narrow with interface endpoints on real AWS" } ]
+  },
+  {
+    "IpProtocol": "tcp", "FromPort": 80, "ToPort": 80,
+    "UserIdGroupPairs": [ { "GroupId": "sg-721d25508070227a5",
+      "Description": "Req 3 - the enrolment API, which since Lab 05 is the load balancer, not the tasks" } ]
+  },
+  {
+    "IpProtocol": "tcp", "FromPort": 5432, "ToPort": 5432,
+    "UserIdGroupPairs": [ { "GroupId": "sg-416f04aa7d1e9b5a8",
+      "Description": "Req 4 - PostgreSQL to the data tier" } ]
+  },
+  {
+    "IpProtocol": "udp", "FromPort": 53, "ToPort": 53,
+    "IpRanges": [ { "CidrIp": "10.0.0.2/32",
+      "Description": "Req 5a - DNS queries to the Amazon VPC resolver (VPC base +2); UDP is DNS's normal transport" } ]
+  },
+  {
+    "IpProtocol": "tcp", "FromPort": 53, "ToPort": 53,
+    "IpRanges": [ { "CidrIp": "10.0.0.2/32",
+      "Description": "Req 5b - DNS over TCP to the VPC resolver, the fallback for truncated (>512 byte) answers" } ]
+  }
+]
